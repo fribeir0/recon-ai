@@ -1,7 +1,7 @@
+
 package handlers
 
 import (
-    "log"
     "net"
     "strings"
     "net/http"
@@ -14,6 +14,14 @@ type ReconRequest struct {
     Target string `json:"target"`
 }
 
+type ReconResponse struct {
+    Target     string   `json:"target"`
+    Subdomains []string `json:"subdomains,omitempty"`
+    Services   string   `json:"services,omitempty"`
+    Nmap       string   `json:"nmap,omitempty"`
+    Error      string   `json:"error,omitempty"`
+}
+
 func ReconHandler(c *gin.Context) {
     var req ReconRequest
     if err := c.BindJSON(&req); err != nil {
@@ -21,19 +29,50 @@ func ReconHandler(c *gin.Context) {
         return
     }
 
-    target := req.Target
-    if net.ParseIP(target) != nil || strings.Contains(target, "/") {
-        log.Println("[INFO] IP/CIDR detected:", target)
-        services.RunNaabu(target)
-        services.RunNmap(target)
-    } else {
-        log.Println("[INFO] Domain detected:", target)
-        subs := services.RunSubfinder(target)
-        for _, sub := range subs {
-            services.RunNaabu(sub)
-            services.RunNmap(sub)
+    res := ReconResponse{Target: req.Target}
+
+    if net.ParseIP(req.Target) != nil || strings.Contains(req.Target, "/") {
+        naabuOut, err := services.RunNaabu(req.Target)
+        res.Services = naabuOut
+        if err != nil {
+            res.Error += "naabu error: " + err.Error() + "; "
         }
+
+        nmapOut, err := services.RunNmap(req.Target)
+        res.Nmap = nmapOut
+        if err != nil {
+            res.Error += "nmap error: " + err.Error() + "; "
+        }
+
+    } else {
+        subs, err := services.RunSubfinder(req.Target)
+        if err != nil {
+            res.Error += "subfinder error: " + err.Error() + "; "
+        } else {
+            res.Subdomains = subs
+        }
+
+        var allNaabu, allNmap []string
+        for _, sub := range subs {
+            if strings.TrimSpace(sub) == "" {
+                continue
+            }
+            naabuOut, err := services.RunNaabu(sub)
+            if err != nil {
+                res.Error += "naabu error on " + sub + ": " + err.Error() + "; "
+            }
+            allNaabu = append(allNaabu, naabuOut)
+
+            nmapOut, err := services.RunNmap(sub)
+            if err != nil {
+                res.Error += "nmap error on " + sub + ": " + err.Error() + "; "
+            }
+            allNmap = append(allNmap, nmapOut)
+        }
+
+        res.Services = strings.Join(allNaabu, "\n")
+        res.Nmap = strings.Join(allNmap, "\n")
     }
 
-    c.JSON(http.StatusOK, gin.H{"message": "Recon started"})
+    c.JSON(http.StatusOK, res)
 }
