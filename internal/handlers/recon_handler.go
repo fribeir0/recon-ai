@@ -1,24 +1,23 @@
-
 package handlers
 
 import (
-    "encoding/json"
     "log"
     "net"
-    "net/http"
     "strings"
+    "net/http"
 
-    "go-recon-ai/internal/services"
+    "github.com/gin-gonic/gin"
+    "go-recon-ai-modular/internal/services"
 )
 
 type ReconRequest struct {
     Target string `json:"target"`
 }
 
-func ReconHandler(w http.ResponseWriter, r *http.Request) {
+func ReconHandler(c *gin.Context) {
     var req ReconRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        http.Error(w, "Invalid request body", http.StatusBadRequest)
+    if err := c.BindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
         return
     }
 
@@ -36,6 +35,5 @@ func ReconHandler(w http.ResponseWriter, r *http.Request) {
         }
     }
 
-    w.WriteHeader(http.StatusOK)
-    w.Write([]byte("Recon started"))
+    c.JSON(http.StatusOK, gin.H{"message": "Recon started"})
 }
