@@ -5,10 +5,11 @@ import (
     "os"
 
     "github.com/go-resty/resty/v2"
-    "go-recon-ai-modular/internal/models"
+    "go-recon-nmap-concurrent/internal/models"
 )
 
-func SendToN8n(result models.ReconResponse) {
+// SendToN8n sends the scan result to the N8N endpoint.
+func SendToN8n(result models.ReconResult) {
     url := os.Getenv("N8N_ENDPOINT")
     if url == "" {
         log.Println("N8N_ENDPOINT not defined")
