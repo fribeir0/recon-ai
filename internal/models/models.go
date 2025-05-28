@@ -5,13 +5,15 @@ type ReconRequest struct {
 }
 
 type PortService struct {
+    Host    string `json:"host"`
     Port    int    `json:"port"`
     Service string `json:"service"`
-    Version string `json:"version"`
+    Version string `json:"version,omitempty"`
 }
 
-type ReconResult struct {
+type ReconResponse struct {
     Target     string        `json:"target"`
-    Subdomains []string      `json:"subdomains"`
-    Services   []PortService `json:"services"`
+    Subdomains []string      `json:"subdomains,omitempty"`
+    Services   []PortService `json:"services,omitempty"`
+    Error      string        `json:"error,omitempty"`
 }

@@ -8,24 +8,20 @@ import (
     "go-recon-ai-modular/internal/models"
 )
 
-// SendToN8n envia o resultado do reconhecimento para um webhook n8n
-func SendToN8n(result models.ReconResult) {
+func SendToN8n(result models.ReconResponse) {
     url := os.Getenv("N8N_ENDPOINT")
     if url == "" {
-        log.Println("N8N_ENDPOINT não definido")
+        log.Println("N8N_ENDPOINT not defined")
         return
     }
-
     client := resty.New()
     resp, err := client.R().
         SetHeader("Content-Type", "application/json").
         SetBody(result).
         Post(url)
-
     if err != nil {
-        log.Println("Erro ao enviar para n8n:", err)
+        log.Println("Error sending to n8n:", err)
         return
     }
-
-    log.Printf("Resposta do n8n: %d", resp.StatusCode())
+    log.Printf("n8n response: %d", resp.StatusCode())
 }
