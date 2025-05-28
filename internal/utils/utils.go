@@ -5,10 +5,9 @@ import (
     "os"
 
     "github.com/go-resty/resty/v2"
-    "go-recon-nmap-concurrent/internal/models"
+    "go-recon-masscan-nmap-optimized/internal/models"
 )
 
-// SendToN8n sends the scan result to the N8N endpoint.
 func SendToN8n(result models.ReconResult) {
     url := os.Getenv("N8N_ENDPOINT")
     if url == "" {
@@ -21,7 +20,7 @@ func SendToN8n(result models.ReconResult) {
         SetBody(result).
         Post(url)
     if err != nil {
-        log.Println("Error sending to n8n:", err)
+        log.Printf("Error sending to n8n: %v", err)
         return
     }
     log.Printf("n8n response: %d", resp.StatusCode())

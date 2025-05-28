@@ -4,9 +4,9 @@ import (
     "net/http"
 
     "github.com/gin-gonic/gin"
-    "go-recon-nmap-concurrent/internal/models"
-    "go-recon-nmap-concurrent/internal/services"
-    "go-recon-nmap-concurrent/internal/utils"
+    "go-recon-masscan-nmap-optimized/internal/models"
+    "go-recon-masscan-nmap-optimized/internal/services"
+    "go-recon-masscan-nmap-optimized/internal/utils"
 )
 
 func ReconHandler(c *gin.Context) {

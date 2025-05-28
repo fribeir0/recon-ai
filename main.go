@@ -5,7 +5,7 @@ import (
     "os"
 
     "github.com/gin-gonic/gin"
-    "go-recon-nmap-concurrent/internal/handlers"
+    "go-recon-masscan-nmap-optimized/internal/handlers"
 )
 
 func main() {
