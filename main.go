@@ -5,7 +5,7 @@ import (
     "os"
 
     "github.com/gin-gonic/gin"
-    "go-recon-batch-nmap-pipeline/internal/handlers"
+    "go-recon-masscan-nmap-universal/internal/handlers"
 )
 
 func main() {
@@ -13,7 +13,7 @@ func main() {
     if port == "" {
         port = "8080"
     }
-    log.Printf("Server starting on port %s", port)
+    log.Printf("Starting server on port %s", port)
     r := gin.Default()
     r.POST("/recon", handlers.ReconHandler)
     r.Run(":" + port)
