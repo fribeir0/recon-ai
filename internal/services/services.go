@@ -1,23 +1,22 @@
 package services
 
 import (
-	"bufio"
-	"bytes"
-	"context"
+    "bufio"
+    "bytes"
+    "context"
+    "fmt"
+    "io/ioutil"
+    "log"
+    "net"
+    "os"
+    "os/exec"
+    "regexp"
+    "sort"
+    "strconv"
+    "strings"
+    "time"
+    "go-recon-batch-nmap-pipeline/internal/models"
 	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"log"
-	"net"
-	"os"
-	"os/exec"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
-	"time"
-
-	"go-recon-batch-nmap-pipeline/internal/models"
 )
 
 var grepableRegex = regexp.MustCompile(`^Host: (\S+) .* Ports: (.+)`)
