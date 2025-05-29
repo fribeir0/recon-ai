@@ -1,4 +1,4 @@
-module go-recon-amass-nmap
+module go-recon-pipeline
 
 go 1.20
 

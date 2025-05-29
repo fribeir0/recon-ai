@@ -5,7 +5,7 @@ import (
     "os"
 
     "github.com/go-resty/resty/v2"
-    "go-recon-amass-nmap/internal/models"
+    "go-recon-pipeline/internal/models"
 )
 
 func SendToN8n(result models.ReconResult) {

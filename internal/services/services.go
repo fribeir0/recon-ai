@@ -4,6 +4,7 @@ import (
     "bufio"
     "bytes"
     "context"
+    "encoding/json"
     "fmt"
     "log"
     "net"
@@ -15,7 +16,7 @@ import (
     "sync"
     "time"
 
-    "go-recon-amass-nmap/internal/models"
+    "go-recon-pipeline/internal/models"
 )
 
 var nmapRegex = regexp.MustCompile(`(?m)^(\d+)/tcp\s+open\s+(\S+)\s+(.*)$`)
@@ -44,7 +45,6 @@ func inc(ip net.IP) {
     }
 }
 
-// RunSubfinder calls the subfinder binary on the PATH
 func RunSubfinder(domain string) ([]string, error) {
     cmd := exec.Command("subfinder", "-d", domain, "-silent")
     out, err := cmd.Output()
@@ -54,71 +54,73 @@ func RunSubfinder(domain string) ([]string, error) {
     return strings.Split(strings.TrimSpace(string(out)), "\n"), nil
 }
 
-// RunAmassIntel fetches hosts via amass intel
-func RunAmassIntel(target string) ([]string, error) {
-    var args []string
-    if net.ParseIP(target) != nil || strings.Contains(target, "/") {
-        args = []string{"intel", "-ip", target, "-silent"}
-    } else {
-        args = []string{"enum", "-d", target, "-silent"}
-    }
-    cmd := exec.Command("amass", args...)
+func RunMasscan(host string) ([]models.PortService, error) {
+    args := []string{"-p1-65535", "--rate", "10000", host, "--open", "--output-format", "json", "--output-file", "-"}
+    cmd := exec.Command("masscan", args...)
     var out bytes.Buffer
     cmd.Stdout = &out
     cmd.Stderr = &out
     if err := cmd.Run(); err != nil {
         return nil, err
     }
-    var hosts []string
     scanner := bufio.NewScanner(&out)
+    var services []models.PortService
     for scanner.Scan() {
-        line := strings.TrimSpace(scanner.Text())
-        if line != "" {
-            hosts = append(hosts, line)
+        var entry struct {
+            IP    string `json:"ip"`
+            Ports []struct{ Port int } `json:"ports"`
+        }
+        line := scanner.Text()
+        if err := json.Unmarshal([]byte(line), &entry); err != nil {
+            continue
+        }
+        for _, p := range entry.Ports {
+            services = append(services, models.PortService{Host: entry.IP, Port: p.Port})
         }
     }
-    return hosts, nil
+    return services, nil
 }
 
-// ScanNmap runs nmap -sV grouped by host concurrently
-func ScanNmap(hosts []string) []models.PortService {
-    var wg sync.WaitGroup
+func ScanNmapOptimized(entries []models.PortService) []models.PortService {
+    hostMap := make(map[string][]int)
+    for _, e := range entries {
+        hostMap[e.Host] = append(hostMap[e.Host], e.Port)
+    }
     ch := make(chan models.PortService)
-    for _, h := range hosts {
+    var wg sync.WaitGroup
+    for host, ports := range hostMap {
         wg.Add(1)
-        go func(host string) {
+        go func(h string, ps []int) {
             defer wg.Done()
-            ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+            sort.Ints(ps)
+            portList := strings.Trim(strings.Replace(fmt.Sprint(ps), " ", ",", -1), "[]")
+            ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
             defer cancel()
-            cmd := exec.CommandContext(ctx, "nmap", "-p-", "-sV", "-Pn", host)
+            args := []string{"-p", portList, "-sV", "-Pn", "-T4",
+                "--version-intensity", "1", "--min-rate", "1000", "--max-retries", "1",
+                "--host-timeout", "30s", h}
+            cmd := exec.CommandContext(ctx, "nmap", args...)
             out, err := cmd.CombinedOutput()
             if err != nil {
-                log.Printf("nmap error on %s: %v", host, err)
+                log.Printf("nmap error on %s: %v", h, err)
             }
             for _, m := range nmapRegex.FindAllStringSubmatch(string(out), -1) {
                 port, _ := strconv.Atoi(m[1])
-                ch <- models.PortService{Host: host, Port: port, Service: m[2], Version: m[3]}
+                ch <- models.PortService{Host: h, Port: port, Service: m[2], Version: m[3]}
             }
-        }(h)
+        }(host, ports)
     }
     go func() {
         wg.Wait()
         close(ch)
     }()
-    var services []models.PortService
+    var results []models.PortService
     for svc := range ch {
-        services = append(services, svc)
+        results = append(results, svc)
     }
-    sort.Slice(services, func(i, j int) bool {
-        if services[i].Host == services[j].Host {
-            return services[i].Port < services[j].Port
-        }
-        return services[i].Host < services[j].Host
-    })
-    return services
+    return results
 }
 
-// RunRecon orchestrates subfinder/amass and nmap based on target type.
 func RunRecon(target string) (models.ReconResult, error) {
     var res models.ReconResult
     res.Target = target
@@ -128,35 +130,27 @@ func RunRecon(target string) (models.ReconResult, error) {
         if err != nil {
             res.Error += fmt.Sprintf("subfinder error: %v; ", err)
         }
-        amassHosts, err := RunAmassIntel(target)
-        if err != nil {
-            res.Error += fmt.Sprintf("amass enum error: %v; ", err)
-        }
+        hosts = append(subs, target)
         res.Subdomains = subs
-        hosts = append(subs, amassHosts...)
-        hosts = append(hosts, target)
-    } else {
-        amassHosts, err := RunAmassIntel(target)
+    } else if strings.Contains(target, "/") {
+        ips, err := expandCIDR(target)
         if err != nil {
-            res.Error += fmt.Sprintf("amass intel error: %v; ", err)
+            return res, err
         }
-        if strings.Contains(target, "/") {
-            ips, _ := expandCIDR(target)
-            hosts = append(hosts, ips...)
-        } else {
-            hosts = []string{target}
-        }
-        hosts = append(hosts, amassHosts...)
+        hosts = ips
+    } else {
+        hosts = []string{target}
     }
-    // dedupe
-    seen := map[string]bool{}
-    var uniq []string
+    // run masscan per host
+    var initial []models.PortService
     for _, h := range hosts {
-        if !seen[h] {
-            seen[h] = true
-            uniq = append(uniq, h)
+        svc, err := RunMasscan(h)
+        if err != nil {
+            res.Error += fmt.Sprintf("masscan error on %s: %v; ", h, err)
+            continue
         }
+        initial = append(initial, svc...)
     }
-    res.Services = ScanNmap(uniq)
+    res.Services = ScanNmapOptimized(initial)
     return res, nil
 }
