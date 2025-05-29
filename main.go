@@ -5,7 +5,7 @@ import (
     "os"
 
     "github.com/gin-gonic/gin"
-    "go-recon-pipeline/internal/handlers"
+    "go-recon-batch-nmap-pipeline/internal/handlers"
 )
 
 func main() {

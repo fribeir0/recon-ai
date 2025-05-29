@@ -1,4 +1,4 @@
-module go-recon-pipeline
+module go-recon-batch-nmap-pipeline
 
 go 1.20
 

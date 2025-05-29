@@ -1,25 +1,26 @@
 package services
 
 import (
-    "bufio"
-    "bytes"
-    "context"
-    "encoding/json"
-    "fmt"
-    "log"
-    "net"
-    "os/exec"
-    "regexp"
-    "sort"
-    "strconv"
-    "strings"
-    "sync"
-    "time"
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"log"
+	"net"
+	"os"
+	"os/exec"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
 
-    "go-recon-pipeline/internal/models"
+	"go-recon-batch-nmap-pipeline/internal/models"
 )
 
-var nmapRegex = regexp.MustCompile(`(?m)^(\d+)/tcp\s+open\s+(\S+)\s+(.*)$`)
+var grepableRegex = regexp.MustCompile(`^Host: (\S+) .* Ports: (.+)`)
 
 func expandCIDR(cidr string) ([]string, error) {
     ip, ipnet, err := net.ParseCIDR(cidr)
@@ -64,7 +65,7 @@ func RunMasscan(host string) ([]models.PortService, error) {
         return nil, err
     }
     scanner := bufio.NewScanner(&out)
-    var services []models.PortService
+    var svcs []models.PortService
     for scanner.Scan() {
         var entry struct {
             IP    string `json:"ip"`
@@ -75,48 +76,79 @@ func RunMasscan(host string) ([]models.PortService, error) {
             continue
         }
         for _, p := range entry.Ports {
-            services = append(services, models.PortService{Host: entry.IP, Port: p.Port})
+            svcs = append(svcs, models.PortService{Host: entry.IP, Port: p.Port})
         }
     }
-    return services, nil
+    return svcs, nil
 }
 
-func ScanNmapOptimized(entries []models.PortService) []models.PortService {
-    hostMap := make(map[string][]int)
+func ScanBatchNmap(entries []models.PortService) []models.PortService {
+    hostSet := map[string]struct{}{}
+    portSet := map[int]struct{}{}
     for _, e := range entries {
-        hostMap[e.Host] = append(hostMap[e.Host], e.Port)
+        hostSet[e.Host] = struct{}{}
+        portSet[e.Port] = struct{}{}
     }
-    ch := make(chan models.PortService)
-    var wg sync.WaitGroup
-    for host, ports := range hostMap {
-        wg.Add(1)
-        go func(h string, ps []int) {
-            defer wg.Done()
-            sort.Ints(ps)
-            portList := strings.Trim(strings.Replace(fmt.Sprint(ps), " ", ",", -1), "[]")
-            ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-            defer cancel()
-            args := []string{"-p", portList, "-sV", "-Pn", "-T4",
-                "--version-intensity", "1", "--min-rate", "1000", "--max-retries", "1",
-                "--host-timeout", "30s", h}
-            cmd := exec.CommandContext(ctx, "nmap", args...)
-            out, err := cmd.CombinedOutput()
-            if err != nil {
-                log.Printf("nmap error on %s: %v", h, err)
-            }
-            for _, m := range nmapRegex.FindAllStringSubmatch(string(out), -1) {
-                port, _ := strconv.Atoi(m[1])
-                ch <- models.PortService{Host: h, Port: port, Service: m[2], Version: m[3]}
-            }
-        }(host, ports)
+    var hosts []string
+    var ports []int
+    for h := range hostSet {
+        hosts = append(hosts, h)
     }
-    go func() {
-        wg.Wait()
-        close(ch)
-    }()
+    for p := range portSet {
+        ports = append(ports, p)
+    }
+    sort.Strings(hosts)
+    sort.Ints(ports)
+
+    // write hosts to temp file
+    file, _ := ioutil.TempFile("", "hosts")
+    defer os.Remove(file.Name())
+    for _, h := range hosts {
+        file.WriteString(h + "\n")
+    }
+    file.Close()
+
+    // build port list
+    portList := strings.Trim(strings.Replace(fmt.Sprint(ports), " ", ",", -1), "[]")
+
+    // run nmap once
+    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+    defer cancel()
+    args := []string{"-iL", file.Name(), "-p", portList, "-sV", "-Pn", "-T4",
+        "--version-intensity", "1", "--min-rate", "1000", "--max-retries", "1",
+        "--host-timeout", "30s", "-oG", "-"}
+    cmd := exec.CommandContext(ctx, "nmap", args...)
+    out, err := cmd.CombinedOutput()
+    if err != nil {
+        log.Println("nmap batch error:", err)
+    }
+
     var results []models.PortService
-    for svc := range ch {
-        results = append(results, svc)
+    scanner := bufio.NewScanner(bytes.NewReader(out))
+    for scanner.Scan() {
+        line := scanner.Text()
+        if matches := grepableRegex.FindStringSubmatch(line); len(matches) == 3 {
+            host := matches[1]
+            portsDesc := matches[2]
+            for _, pd := range strings.Split(portsDesc, ",") {
+                parts := strings.Split(pd, "/")
+                if len(parts) < 5 || parts[1] != "open" {
+                    continue
+                }
+                port, _ := strconv.Atoi(parts[0])
+                service := parts[4]
+                version := ""
+                if idx := strings.Index(pd, service+"/"); idx != -1 {
+                    version = strings.Trim(pd[idx+len(service)+1:], " ")
+                }
+                results = append(results, models.PortService{
+                    Host:    host,
+                    Port:    port,
+                    Service: service,
+                    Version: version,
+                })
+            }
+        }
     }
     return results
 }
@@ -133,24 +165,20 @@ func RunRecon(target string) (models.ReconResult, error) {
         hosts = append(subs, target)
         res.Subdomains = subs
     } else if strings.Contains(target, "/") {
-        ips, err := expandCIDR(target)
-        if err != nil {
-            return res, err
-        }
+        ips, _ := expandCIDR(target)
         hosts = ips
     } else {
         hosts = []string{target}
     }
-    // run masscan per host
     var initial []models.PortService
     for _, h := range hosts {
-        svc, err := RunMasscan(h)
+        svcs, err := RunMasscan(h)
         if err != nil {
             res.Error += fmt.Sprintf("masscan error on %s: %v; ", h, err)
             continue
         }
-        initial = append(initial, svc...)
+        initial = append(initial, svcs...)
     }
-    res.Services = ScanNmapOptimized(initial)
+    res.Services = ScanBatchNmap(initial)
     return res, nil
 }
