@@ -1,4 +1,4 @@
-module go-recon-masscan-nmap-optimized
+module go-recon-amass-nmap
 
 go 1.20
 

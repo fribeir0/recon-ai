@@ -15,4 +15,5 @@ type ReconResult struct {
     Target     string        `json:"target"`
     Subdomains []string      `json:"subdomains,omitempty"`
     Services   []PortService `json:"services"`
+    Error      string        `json:"error,omitempty"`
 }

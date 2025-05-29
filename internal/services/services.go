@@ -3,6 +3,7 @@ package services
 import (
     "bufio"
     "bytes"
+    "context"
     "fmt"
     "log"
     "net"
@@ -12,138 +13,150 @@ import (
     "strconv"
     "strings"
     "sync"
+    "time"
 
-    "go-recon-masscan-nmap-optimized/internal/models"
+    "go-recon-amass-nmap/internal/models"
 )
 
 var nmapRegex = regexp.MustCompile(`(?m)^(\d+)/tcp\s+open\s+(\S+)\s+(.*)$`)
 
-type HostPort struct {
-    Host string
-    Port int
+func expandCIDR(cidr string) ([]string, error) {
+    ip, ipnet, err := net.ParseCIDR(cidr)
+    if err != nil {
+        return nil, err
+    }
+    var ips []string
+    for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); inc(ip) {
+        ips = append(ips, ip.String())
+    }
+    if len(ips) > 2 {
+        return ips[1 : len(ips)-1], nil
+    }
+    return ips, nil
 }
 
-// runCmd executes a command and returns its stdout lines.
-func runCmd(name string, args ...string) ([]string, error) {
-    cmd := exec.Command(name, args...)
+func inc(ip net.IP) {
+    for j := len(ip) - 1; j >= 0; j-- {
+        ip[j]++
+        if ip[j] != 0 {
+            break
+        }
+    }
+}
+
+// RunSubfinder calls the subfinder binary on the PATH
+func RunSubfinder(domain string) ([]string, error) {
+    cmd := exec.Command("subfinder", "-d", domain, "-silent")
+    out, err := cmd.Output()
+    if err != nil {
+        return nil, err
+    }
+    return strings.Split(strings.TrimSpace(string(out)), "\n"), nil
+}
+
+// RunAmassIntel fetches hosts via amass intel
+func RunAmassIntel(target string) ([]string, error) {
+    var args []string
+    if net.ParseIP(target) != nil || strings.Contains(target, "/") {
+        args = []string{"intel", "-ip", target, "-silent"}
+    } else {
+        args = []string{"enum", "-d", target, "-silent"}
+    }
+    cmd := exec.Command("amass", args...)
     var out bytes.Buffer
     cmd.Stdout = &out
     cmd.Stderr = &out
     if err := cmd.Run(); err != nil {
         return nil, err
     }
-    var lines []string
+    var hosts []string
     scanner := bufio.NewScanner(&out)
     for scanner.Scan() {
-        lines = append(lines, scanner.Text())
-    }
-    return lines, nil
-}
-
-// RunSubfinder discovers subdomains (if target is domain).
-func RunSubfinder(domain string) ([]string, error) {
-    return runCmd("subfinder", "-d", domain, "-silent")
-}
-
-// RunMasscan uses masscan to quickly find open TCP ports.
-func RunMasscan(target string) ([]HostPort, error) {
-    lines, err := runCmd("masscan", target, "-p1-65535", "--rate", "10000", "--wait", "0", "-oL", "-")
-    if err != nil {
-        return nil, err
-    }
-    var hps []HostPort
-    for _, line := range lines {
-        fields := strings.Fields(line)
-        if len(fields) >= 4 && fields[0] == "open" && fields[1] == "tcp" {
-            host := fields[2]
-            port, err := strconv.Atoi(fields[3])
-            if err == nil {
-                hps = append(hps, HostPort{Host: host, Port: port})
-            }
+        line := strings.TrimSpace(scanner.Text())
+        if line != "" {
+            hosts = append(hosts, line)
         }
     }
-    return hps, nil
+    return hosts, nil
 }
 
-// ScanNmapConcurrent runs nmap -sV on aggregated ports per host in parallel.
-func ScanNmapConcurrent(hps []HostPort) []models.PortService {
+// ScanNmap runs nmap -sV grouped by host concurrently
+func ScanNmap(hosts []string) []models.PortService {
     var wg sync.WaitGroup
     ch := make(chan models.PortService)
-
-    // group ports by host
-    hostPorts := make(map[string][]int)
-    for _, hp := range hps {
-        hostPorts[hp.Host] = append(hostPorts[hp.Host], hp.Port)
-    }
-
-    for host, ports := range hostPorts {
+    for _, h := range hosts {
         wg.Add(1)
-        go func(h string, ps []int) {
+        go func(host string) {
             defer wg.Done()
-            sort.Ints(ps)
-            portList := strings.Trim(strings.Replace(fmt.Sprint(ps), " ", ",", -1), "[]")
-            args := []string{"-p", portList, "-sV", "-Pn", "-T4", "--min-rate", "1000", "--max-retries", "1", "--host-timeout", "30s", h}
-            out, err := exec.Command("nmap", args...).CombinedOutput()
+            ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+            defer cancel()
+            cmd := exec.CommandContext(ctx, "nmap", "-p-", "-sV", "-Pn", host)
+            out, err := cmd.CombinedOutput()
             if err != nil {
-                log.Printf("nmap error on %s: %v", h, err)
+                log.Printf("nmap error on %s: %v", host, err)
             }
-            text := string(out)
-            for _, m := range nmapRegex.FindAllStringSubmatch(text, -1) {
+            for _, m := range nmapRegex.FindAllStringSubmatch(string(out), -1) {
                 port, _ := strconv.Atoi(m[1])
-                ch <- models.PortService{
-                    Host:    h,
-                    Port:    port,
-                    Service: m[2],
-                    Version: m[3],
-                }
+                ch <- models.PortService{Host: host, Port: port, Service: m[2], Version: m[3]}
             }
-        }(host, ports)
+        }(h)
     }
-
     go func() {
         wg.Wait()
         close(ch)
     }()
-
-    var results []models.PortService
+    var services []models.PortService
     for svc := range ch {
-        results = append(results, svc)
+        services = append(services, svc)
     }
-    return results
+    sort.Slice(services, func(i, j int) bool {
+        if services[i].Host == services[j].Host {
+            return services[i].Port < services[j].Port
+        }
+        return services[i].Host < services[j].Host
+    })
+    return services
 }
 
-// RunRecon orchestrates subfinder, masscan, and nmap.
+// RunRecon orchestrates subfinder/amass and nmap based on target type.
 func RunRecon(target string) (models.ReconResult, error) {
     var res models.ReconResult
     res.Target = target
-
-    // determine hosts list
     var hosts []string
-    if ip := net.ParseIP(target); ip != nil || strings.Contains(target, "/") {
-        hosts = []string{target}
-    } else {
+    if net.ParseIP(target) == nil && !strings.Contains(target, "/") {
         subs, err := RunSubfinder(target)
         if err != nil {
-            log.Printf("subfinder error: %v", err)
-            hosts = []string{target}
-        } else {
-            res.Subdomains = subs
-            hosts = append(subs, target)
+            res.Error += fmt.Sprintf("subfinder error: %v; ", err)
         }
-    }
-
-    // masscan for each host/range
-    var allHPs []HostPort
-    for _, h := range hosts {
-        hps, err := RunMasscan(h)
+        amassHosts, err := RunAmassIntel(target)
         if err != nil {
-            log.Printf("masscan error on %s: %v", h, err)
-            continue
+            res.Error += fmt.Sprintf("amass enum error: %v; ", err)
         }
-        allHPs = append(allHPs, hps...)
+        res.Subdomains = subs
+        hosts = append(subs, amassHosts...)
+        hosts = append(hosts, target)
+    } else {
+        amassHosts, err := RunAmassIntel(target)
+        if err != nil {
+            res.Error += fmt.Sprintf("amass intel error: %v; ", err)
+        }
+        if strings.Contains(target, "/") {
+            ips, _ := expandCIDR(target)
+            hosts = append(hosts, ips...)
+        } else {
+            hosts = []string{target}
+        }
+        hosts = append(hosts, amassHosts...)
     }
-
-    // nmap version scan concurrently
-    res.Services = ScanNmapConcurrent(allHPs)
+    // dedupe
+    seen := map[string]bool{}
+    var uniq []string
+    for _, h := range hosts {
+        if !seen[h] {
+            seen[h] = true
+            uniq = append(uniq, h)
+        }
+    }
+    res.Services = ScanNmap(uniq)
     return res, nil
 }

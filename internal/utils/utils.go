@@ -5,7 +5,7 @@ import (
     "os"
 
     "github.com/go-resty/resty/v2"
-    "go-recon-masscan-nmap-optimized/internal/models"
+    "go-recon-amass-nmap/internal/models"
 )
 
 func SendToN8n(result models.ReconResult) {
@@ -20,7 +20,7 @@ func SendToN8n(result models.ReconResult) {
         SetBody(result).
         Post(url)
     if err != nil {
-        log.Printf("Error sending to n8n: %v", err)
+        log.Println("Error sending to n8n:", err)
         return
     }
     log.Printf("n8n response: %d", resp.StatusCode())

@@ -5,17 +5,16 @@ import (
     "os"
 
     "github.com/gin-gonic/gin"
-    "go-recon-masscan-nmap-optimized/internal/handlers"
+    "go-recon-amass-nmap/internal/handlers"
 )
 
 func main() {
-    r := gin.Default()
-    r.POST("/recon", handlers.ReconHandler)
-
     port := os.Getenv("PORT")
     if port == "" {
         port = "8080"
     }
-    log.Printf("Server starting on port %s", port)
+    log.Printf("Starting server on port %s", port)
+    r := gin.Default()
+    r.POST("/recon", handlers.ReconHandler)
     r.Run(":" + port)
 }
