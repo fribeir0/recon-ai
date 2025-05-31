@@ -9,7 +9,10 @@ import (
 	"strings"
 )
 
-
+// ----------------------------------------------------
+// 1) RunSubfinder: dado um domínio, executa `subfinder -d <domínio> -silent`
+//    Retorna slice de subdomínios (cada linha do stdout), ou erro se algo deu errado.
+// ----------------------------------------------------
 func RunSubfinder(domain string) ([]string, error) {
 	out, err := exec.Command("subfinder", "-d", domain, "-silent").Output()
 	if err != nil {
@@ -19,10 +22,16 @@ func RunSubfinder(domain string) ([]string, error) {
 	if raw == "" {
 		return []string{}, nil
 	}
-	return strings.Split(raw, "\n"), nil
+	subs := strings.Split(raw, "\n")
+	return subs, nil
 }
 
-
+// ----------------------------------------------------
+// 2) DiscoverHostsCIDR: usa o Naabu em modo “host discovery” (-sn -silent -host <CIDR>)
+//    - Executa: naabu -silent -sn -host <CIDR>
+//    - Se houver IPs no stdout, retorna a lista, ignorando exit code ≠ 0.
+//    - Se stdout estiver vazio, retorna slice vazio sem erro.
+// ----------------------------------------------------
 func DiscoverHostsCIDR(cidr string) ([]string, error) {
 	// Executa Naabu
 	cmd := exec.Command("naabu", "-silent", "-sn", "-host", cidr)
@@ -44,23 +53,27 @@ func DiscoverHostsCIDR(cidr string) ([]string, error) {
 }
 
 
+// ----------------------------------------------------
+// 3) RunPortScanNaabu: dado um slice de hosts e string “ports” (ex: "80,443" ou "1-1000")
+//    - Se “ports” estiver vazio, usa "-top-ports 100"; senão, "-p <ports>".
+//    - Monta: naabu -silent -list - -top-ports 100  (ou "-p <ports>")
+//    - Alimenta Naabu pelo stdin, lê stdout+stderr em buffer.
+//    - Se exit code ≠ 0 mas houver conteúdo em buffer, ignora o erro e parseia.
+//    - Se buffer vazio, retorna map vazio.
+// ----------------------------------------------------
 func RunPortScanNaabu(hosts []string, ports string) (map[string][]string, error) {
 	if len(hosts) == 0 {
 		return nil, errors.New("nenhum host para escanear")
 	}
 
 	var args []string
-
 	if ports == "" {
-		args = []string{"-silent", "-l", "-", "-top-ports", "100"}
+		args = []string{"-silent", "-list", "-", "-top-ports", "100"}
 	} else {
-		args = []string{"-silent", "-l", "-", "-p", ports}
+		args = []string{"-silent", "-list", "-", "-p", ports}
 	}
-	
-
 	cmd := exec.Command("naabu", args...)
 
-	// Capturar stdout+stderr num buffer
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
@@ -74,7 +87,6 @@ func RunPortScanNaabu(hosts []string, ports string) (map[string][]string, error)
 		return nil, err
 	}
 
-	// Escreve cada host (IP) na entrada do Naabu
 	go func() {
 		defer stdinPipe.Close()
 		for _, ip := range hosts {
@@ -82,31 +94,22 @@ func RunPortScanNaabu(hosts []string, ports string) (map[string][]string, error)
 		}
 	}()
 
-	// Aguarda o Naabu terminar
 	if err := cmd.Wait(); err != nil {
-		// Mesmo que ele retorne exit code != 0, vamos parsear o que esteja no buffer
+		// Se buf não estiver vazio, ignora o erro; senão, retorna map vazio
 		if strings.TrimSpace(buf.String()) == "" {
-			// Saída totalmente vazia => consideramos “nenhuma porta encontrada”
 			return map[string][]string{}, nil
 		}
-		// Se buf tiver linhas “IP:PORT”, vamos parsear abaixo
 	}
 
 	raw := strings.TrimSpace(buf.String())
 	if raw == "" {
-		// Se não veio nada, devolvemos map vazio
 		return map[string][]string{}, nil
 	}
 
-	// Debug: logar tudo que veio no buffer (útil para ver o que exatamente o Naabu respondeu)
-	log.Println("[DEBUG] Naabu saiu com:\n" + raw)
-
-	// Agora dividimos cada linha “IP:PORT”
-	result := make(map[string][]string)
+	resultado := make(map[string][]string)
 	scanner := bufio.NewScanner(strings.NewReader(raw))
 	for scanner.Scan() {
-		line := scanner.Text()
-		line = strings.TrimSpace(line)
+		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
@@ -116,11 +119,42 @@ func RunPortScanNaabu(hosts []string, ports string) (map[string][]string, error)
 		}
 		ip := parts[0]
 		porta := parts[1]
-		result[ip] = append(result[ip], porta)
+		resultado[ip] = append(resultado[ip], porta)
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
 		log.Println("[WARN] erro ao ler saída do Naabu:", scanErr)
 	}
 
-	return result, nil
+	return resultado, nil
+}
+
+// ----------------------------------------------------
+// 4) RunNmapServiceScan: dado um map[ip][]string (portas abertas por IP),
+//    executa “nmap -sV -p <lista_de_portas> <ip>” para cada IP.
+//    Retorna map[ip]string com o output bruto do Nmap. Se não houver portas,
+//    atribui string vazia para aquele IP.
+// ----------------------------------------------------
+func RunNmapServiceScan(ipsPorts map[string][]string) (map[string]string, error) {
+	results := make(map[string]string)
+
+	for ip, portas := range ipsPorts {
+		if len(portas) == 0 {
+			results[ip] = ""
+			continue
+		}
+		portsArg := strings.Join(portas, ",")
+		cmd := exec.Command("nmap", "-sV", "-p", portsArg, ip)
+
+		var buf bytes.Buffer
+		cmd.Stdout = &buf
+		cmd.Stderr = &buf
+
+		if err := cmd.Run(); err != nil {
+			// Se Nmap falhar, anexa a mensagem de erro ao buffer
+			buf.WriteString("\n[ERROR] nmap returned error: " + err.Error())
+		}
+		results[ip] = buf.String()
+	}
+
+	return results, nil
 }
